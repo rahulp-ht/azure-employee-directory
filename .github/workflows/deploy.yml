@@ -6,23 +6,67 @@ on:
   workflow_dispatch:
 
 jobs:
+  install:
+    name: 1. Install Dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: employee-directory
+          path: .
+          include-hidden-files: true
+
+  validate:
+    name: 2. Validate Syntax
+    needs: install
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download application
+        uses: actions/download-artifact@v4
+        with:
+          name: employee-directory
+          path: .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Check server syntax
+        run: node --check server.js
+
   deploy:
+    name: 3. Deploy to Azure
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - name: Download application
+        uses: actions/download-artifact@v4
         with:
-          node-version: '24'
-
-      - name: Install dependencies and check syntax
-        run: |
-          npm ci --omit=dev
-          node --check server.js
+          name: employee-directory
+          path: .
 
       - name: Sign in to Azure
         uses: azure/login@v2
