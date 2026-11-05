@@ -1,30 +1,140 @@
-name: Deploy Employee Directory
+name: Employee Directory CI/CD
 
 on:
   push:
+    branches: [dev, main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
+# Azure authentication is granted only to the deployment job.
+permissions:
+  contents: read
+env:
+  NODE_VERSION: '24'
+  AZURE_WEBAPP_NAME: rahulp-employee-web-1104
+  APP_URL: https://rahulp-employee-web-1104-gkc4bka9eff4djb8.southindia-01.azurewebsites.net
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
+  ci:
+    name: Validate and package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install all dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            node --check "$file"
+          done < <(
+            git ls-files -z -- '*.js' '*.cjs' '*.mjs'
+          )
+
+      - name: Run configured lint, tests, and build
+        run: |
+          set -euo pipefail
+
+          for script in lint test build; do
+            if SCRIPT_NAME="$script" node -e \
+              'process.exit(require("./package.json").scripts?.[process.env.SCRIPT_NAME] ? 0 : 1)'; then
+              npm run "$script"
+            else
+              echo "::notice::No '$script' script configured in package.json."
+            fi
+          done
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Prepare deployment package
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+
+          # Include tracked application files, excluding repository metadata,
+          # tests, local secrets, and documentation.
+
+          STAGING_DIR="$RUNNER_TEMP/employee-release"
+          mkdir -p "$STAGING_DIR"
+
+          git archive HEAD | tar -x -C "$STAGING_DIR"
+
+          rm -rf \
+            "$STAGING_DIR/.github" \
+            "$STAGING_DIR/test" \
+            "$STAGING_DIR/tests" \
+            "$STAGING_DIR/docs"
+
+          find "$STAGING_DIR" -type f \
+            \( -name '.env' -o -name '.env.*' \) -delete
+
+          # Copy generated build output when the project has one.
+          for directory in dist build; do
+            if [[ -d "$directory" ]]; then
+              rm -rf "$STAGING_DIR/$directory"
+              cp -a "$directory" "$STAGING_DIR/$directory"
+            fi
+          done
+
+          cd "$STAGING_DIR"
+
+          # Install only runtime dependencies into the release package.
+          npm ci --omit=dev
+
+          zip -qr "$GITHUB_WORKSPACE/employee-directory.zip" .
+
+      - name: Upload deployment artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: employee-directory-${{ github.sha }}
+          path: employee-directory.zip
+          if-no-files-found: error
+          retention-days: 7
+
   deploy:
-    runs-on: ubuntu-latest
+    name: Deploy and verify
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
     permissions:
       contents: read
       id-token: write
 
+    # Prevent simultaneous deployments to the same Web App.
+    concurrency:
+      group: employee-directory-production
+      cancel-in-progress: false
+
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - name: Download deployment artifact
+        uses: actions/download-artifact@v4
         with:
-          node-version: '24'
+          name: employee-directory-${{ github.sha }}
+          path: release
 
-      - name: Install dependencies and check syntax
-        run: |
-          npm ci --omit=dev
-          node --check server.js
-
-      - name: Sign in to Azure
+      - name: Sign in to Azure using OIDC
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -34,5 +144,37 @@ jobs:
       - name: Deploy to App Service
         uses: azure/webapps-deploy@v3
         with:
-          app-name: rahulp-employee-web-1104
-          package: .
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          package: release/employee-directory.zip
+
+      - name: Verify live application
+        run: |
+          set -euo pipefail
+          RESPONSE_FILE="$RUNNER_TEMP/employee-response.html"
+
+          for attempt in {1..12}; do
+            echo "Checking application: attempt $attempt"
+
+            if curl --fail --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              -H 'Cache-Control: no-cache' \
+              "$APP_URL/?deployment=$GITHUB_SHA" \
+              -o "$RESPONSE_FILE"; then
+
+              if [[ -s "$RESPONSE_FILE" ]] &&
+                 ! grep -qi 'Could not load employees' "$RESPONSE_FILE"; then
+                echo "Application responded without the known database error."
+                exit 0
+              fi
+            fi
+
+            sleep 10
+          done
+
+          echo "::error::Application verification failed. Check App Service logs."
+          exit 1
+
+      - name: Sign out of Azure
+        if: always()
+        run: az logout
