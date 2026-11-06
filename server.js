@@ -62,7 +62,7 @@ app.get('/', async (_req, res) => {
 <body>
   <main>
     <header>
-      <h1>Employee Directory</h1>
+      <h1>Azure Live Demonstration</h1>
       <p>Azure SQL Database · ${employees.length} employee record</p>
     </header>
     <div class="table-card">
