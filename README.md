@@ -208,3 +208,5 @@ Review **Azure Portal → Home → Subscriptions → Azure subscription 1 → Co
 App Service plan pricing, SQL compute/storage, Key Vault operations, and monitoring usage can contribute to charges. Stopping the Web App does not necessarily stop App Service plan billing.
 
 Before deleting a resource group, verify that it contains only resources you intend to remove. Preserve any required data and check for project resources left in other groups.
+
+employee.therahulpatil.in - DNS
